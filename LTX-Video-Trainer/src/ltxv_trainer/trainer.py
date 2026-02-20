@@ -1,4 +1,6 @@
 import os  # noqa: I001
+import subprocess
+import tempfile
 import time
 import warnings
 from contextlib import nullcontext
@@ -108,7 +110,10 @@ class LtxvTrainer:
         self._global_step = -1
         self._checkpoint_paths = []
         self._init_wandb()
-        self._training_strategy = get_training_strategy(self._config.conditioning)
+        self._training_strategy = get_training_strategy(
+            self._config.conditioning,
+            qsfm_config=self._config.qsfm if self._config.conditioning.mode == "qsfm" else None,
+        )
 
     def train(  # noqa: PLR0912, PLR0915
         self,
@@ -778,6 +783,12 @@ class LtxvTrainer:
 
         progress.remove_task(task)
 
+        # 여러 샷을 하나의 영상으로 이어붙이기 (2개 이상일 때만)
+        if len(video_paths) > 1:
+            combined_path = output_dir / f"step_{self._global_step:06d}_combined.mp4"
+            self._concat_videos(video_paths, combined_path)
+            video_paths = [combined_path] + video_paths  # combined을 목록 맨 앞에 추가
+
         # Move unused components back to CPU.
         self._vae.to("cpu")
         if not self._config.acceleration.load_text_encoder_in_8bit:
@@ -786,6 +797,31 @@ class LtxvTrainer:
         rel_outputs_path = output_dir.relative_to(self._config.output_dir)
         logger.info(f"🎥 Validation samples for step {self._global_step} saved in {rel_outputs_path}")
         return video_paths
+
+    @staticmethod
+    def _concat_videos(video_paths: list, output_path: Path) -> None:
+        """ffmpeg concat demuxer를 사용해 여러 mp4를 순서대로 이어붙인다."""
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+                for p in video_paths:
+                    f.write(f"file '{p}'\n")
+                filelist = f.name
+
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-f", "concat", "-safe", "0",
+                    "-i", filelist,
+                    "-c", "copy",
+                    str(output_path),
+                ],
+                capture_output=True,
+                check=True,
+            )
+            os.unlink(filelist)
+            logger.info(f"🎬 Combined {len(video_paths)} shots → {output_path.name}")
+        except Exception as e:
+            logger.warning(f"Video concatenation failed: {e}")
 
     @staticmethod
     def _log_training_stats(stats: TrainingStats) -> None:

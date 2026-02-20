@@ -74,7 +74,7 @@ class LoraConfig(ConfigBaseModel):
 class ConditioningConfig(ConfigBaseModel):
     """Configuration for conditioning during training"""
 
-    mode: Literal["none", "reference_video"] = Field(
+    mode: Literal["none", "reference_video", "qsfm"] = Field(
         default="none",
         description="Type of conditioning to use during training",
     )
@@ -334,6 +334,51 @@ class WandbConfig(ConfigBaseModel):
     )
 
 
+class QSFMConfig(ConfigBaseModel):
+    """Configuration for Quantum Superposition Flow Matching (QSFM)"""
+
+    n_idx_qubits: int = Field(
+        default=2,
+        description="Index register qubits. K_max = 2^n_idx shots (default K=4)",
+        ge=1,
+    )
+
+    n_latent_qubits: int = Field(
+        default=5,
+        description="Latent register qubits. d_latent = 2^n_latent (default 32)",
+        ge=2,
+    )
+
+    time_embed_dim: int = Field(
+        default=64,
+        description="Time embedding dimension for PQC",
+    )
+
+    n_pqc_layers: int = Field(
+        default=1,
+        description="Number of PQC layers in backward channel",
+        ge=1,
+    )
+
+    n_ancilla_qubits: int = Field(
+        default=2,
+        description="Number of ancilla (environment) qubits for Stinespring dilation",
+        ge=1,
+    )
+
+    loss_type: Literal["hilbert_schmidt", "fidelity"] = Field(
+        default="hilbert_schmidt",
+        description="Quantum loss function: 'hilbert_schmidt' or 'fidelity'",
+    )
+
+    loss_weight: float = Field(
+        default=0.5,
+        description="Weight α for QSFM loss. Total = α·L_QSFM + (1-α)·L_flow",
+        ge=0.0,
+        le=1.0,
+    )
+
+
 class FlowMatchingConfig(ConfigBaseModel):
     """Configuration for flow matching training"""
 
@@ -362,6 +407,7 @@ class LtxvTrainerConfig(ConfigBaseModel):
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
     hub: HubConfig = Field(default_factory=HubConfig)
     flow_matching: FlowMatchingConfig = Field(default_factory=FlowMatchingConfig)
+    qsfm: QSFMConfig = Field(default_factory=QSFMConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)
 
     # General configuration
@@ -399,5 +445,9 @@ class LtxvTrainerConfig(ConfigBaseModel):
         # Check that LoRA config is provided when using reference_video conditioning with LoRA training mode
         if self.conditioning.mode == "reference_video" and self.model.training_mode != "lora":
             raise ValueError("Training mode must be 'lora' when using reference_video conditioning")
+
+        # QSFM mode: only lora training is supported for now
+        if self.conditioning.mode == "qsfm" and self.model.training_mode not in ("lora", "full"):
+            raise ValueError("Training mode must be 'lora' or 'full' when using qsfm conditioning")
 
         return self

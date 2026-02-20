@@ -439,11 +439,12 @@ class ReferenceVideoTrainingStrategy(TrainingStrategy):
         return loss.mean()
 
 
-def get_training_strategy(conditioning_config: ConditioningConfig) -> TrainingStrategy:
+def get_training_strategy(conditioning_config: ConditioningConfig, qsfm_config=None) -> TrainingStrategy:
     """Factory function to create the appropriate training strategy.
 
     Args:
         conditioning_config: Configuration for conditioning behavior
+        qsfm_config: Optional QSFMConfig for quantum superposition flow matching
 
     Returns:
         The appropriate training strategy instance
@@ -457,6 +458,27 @@ def get_training_strategy(conditioning_config: ConditioningConfig) -> TrainingSt
         strategy = StandardTrainingStrategy(conditioning_config)
     elif conditioning_mode == "reference_video":
         strategy = ReferenceVideoTrainingStrategy(conditioning_config)
+    elif conditioning_mode == "qsfm":
+        from ltxv_trainer.qsfm import QSFMModule
+        from ltxv_trainer.qsfm_strategy import QSFMTrainingStrategy
+
+        if qsfm_config is None:
+            raise ValueError("qsfm_config must be provided when conditioning.mode == 'qsfm'")
+
+        qsfm_module = QSFMModule(
+            latent_dim=128,  # LTX-Video latent channel dimension
+            n_idx_qubits=qsfm_config.n_idx_qubits,
+            n_latent_qubits=qsfm_config.n_latent_qubits,
+            time_embed_dim=qsfm_config.time_embed_dim,
+            n_pqc_layers=qsfm_config.n_pqc_layers,
+            n_ancilla_qubits=qsfm_config.n_ancilla_qubits,
+            loss_type=qsfm_config.loss_type,
+        )
+        strategy = QSFMTrainingStrategy(
+            conditioning_config=conditioning_config,
+            qsfm_module=qsfm_module,
+            qsfm_loss_weight=qsfm_config.loss_weight,
+        )
     else:
         raise ValueError(f"Unknown conditioning mode: {conditioning_mode}")
 
