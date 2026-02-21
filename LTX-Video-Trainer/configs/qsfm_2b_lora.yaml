@@ -1,0 +1,113 @@
+# ============================================================
+# Quantum Superposition Flow Matching (QSFM) Training Config
+# LTX-Video 2B + LoRA + QSFM  |  K=8 shots, 97 frames (~4s)
+# ============================================================
+
+# ── 모델 설정 ───────────────────────────────────────────────
+model:
+  model_source: "LTXV_2B_0.9.6_DEV"
+  training_mode: "lora"
+  load_checkpoint: null
+
+# ── LoRA 설정 ───────────────────────────────────────────────
+lora:
+  rank: 32
+  alpha: 32
+  dropout: 0.0
+  target_modules:
+    - "to_k"
+    - "to_q"
+    - "to_v"
+    - "to_out.0"
+
+# ── 컨디셔닝 설정 (QSFM 모드) ─────────────────────────────
+conditioning:
+  mode: "qsfm"
+  first_frame_conditioning_p: 0.0
+
+# ── QSFM 양자 회로 설정 ─────────────────────────────────────
+# n_idx_qubits=3 → K_max=8 샷
+# n_latent_qubits=3 → d_latent=8
+# 총 system qubits = 3+3 = 6 → D_sys=64  (이전 2+4=6과 동일)
+# Stinespring: n_total = 6+2 = 8 → D_tot=256  (이전과 동일)
+# 양자 회로 크기 변화 없이 K=8 샷 지원
+qsfm:
+  n_idx_qubits: 3        # K_max = 8 샷
+  n_latent_qubits: 3     # d_latent = 8
+  time_embed_dim: 32
+  n_pqc_layers: 1
+  n_ancilla_qubits: 2
+  loss_type: "hilbert_schmidt"
+  loss_weight: 0.3       # α: 전체 손실 = 0.3·L_QSFM + 0.7·L_flow
+
+# ── 최적화 설정 ─────────────────────────────────────────────
+optimization:
+  learning_rate: 2e-4
+  steps: 2000
+  batch_size: 8          # K=8 샷 → 배치 크기 8 (8개 씬 전부 1 스텝)
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  optimizer_type: "adamw"
+  scheduler_type: "constant"
+  scheduler_params: {}
+  enable_gradient_checkpointing: false
+
+# ── 가속 설정 ───────────────────────────────────────────────
+acceleration:
+  mixed_precision_mode: "bf16"
+  quantization: null
+  load_text_encoder_in_8bit: true
+  compile_with_inductor: false
+  compilation_mode: "reduce-overhead"
+
+# ── 데이터 설정 ─────────────────────────────────────────────
+data:
+  preprocessed_data_root: "/home/dongwoo43/qfm/qsfm_data"
+  num_dataloader_workers: 0
+
+# ── 검증 설정 (8개 씬 각각의 학습 캡션으로 8샷 생성) ──────
+validation:
+  prompts:
+    - "A cartoon rabbit waddles through an open meadow as small animated birds circle overhead."
+    - "A large fluffy rabbit sits near a pond surrounded by trees in an animated nature scene."
+    - "Three squirrels fly through the air over a forest as a giant rabbit watches with curiosity."
+    - "An animated rabbit chases a small rodent through tall grass in a colorful cartoon forest."
+    - "A cartoon rabbit runs away from three flying squirrels through a bright green forest."
+    - "A rabbit and a squirrel interact playfully near a stream in a vibrant animated scene."
+    - "Animated birds land on a resting rabbit in a peaceful forest setting."
+    - "A giant animated rabbit stretches and yawns in a sunlit forest meadow."
+  negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
+  images: null
+  video_dims: [512, 320, 97]   # 97 프레임 = 약 4초
+  seed: 42
+  inference_steps: 30
+  interval: 200
+  videos_per_prompt: 1         # 프롬프트 8개 × 1 = 8 샷 영상 출력
+  guidance_scale: 3.5
+  skip_initial_validation: true
+
+# ── 체크포인트 설정 ─────────────────────────────────────────
+checkpoints:
+  interval: 200
+  keep_last_n: 3
+
+# ── Flow Matching 설정 ──────────────────────────────────────
+flow_matching:
+  timestep_sampling_mode: "uniform"
+  timestep_sampling_params: {}
+
+# ── Hub / W&B 설정 ──────────────────────────────────────────
+hub:
+  push_to_hub: false
+  hub_model_id: null
+
+wandb:
+  enabled: false
+  project: "qsfm-ltxv"
+  entity: null
+  tags: ["qsfm", "quantum", "ltxv", "8shot"]
+  log_validation_videos: true
+
+# ── 공통 설정 ───────────────────────────────────────────────
+seed: 42
+output_dir: "outputs/qsfm_lora"

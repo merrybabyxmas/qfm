@@ -26,6 +26,9 @@ configs/*.yaml
 !configs/ltxv_2b_full.yaml
 !configs/ltxv_2b_lora.yaml
 !configs/ltxv_2b_lora_low_vram.yaml
-outputs
-LTX-Video-Trainer/qsfm_data/
+!configs/qsfm_2b_lora.yaml
+!configs/qsfm_ablation_no_hamiltonian.yaml
+!configs/qsfm_ablation_gaussian.yaml
+outputs/
+qsfm_data/
 eval_workspace/

@@ -1,0 +1,17 @@
+# 실험 결과 / 데이터 (코드가 아닌 대용량 파일)
+eval_workspace/
+qsfm_data/
+mnist_data/
+ucf101_data/
+
+# 학습 출력물
+LTX-Video-Trainer/outputs/
+
+# 모델 캐시
+__pycache__/
+.cache/
+*.pyc
+
+# 임시 파일
+*.log
+/tmp/

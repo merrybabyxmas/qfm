@@ -1,0 +1,101 @@
+# ============================================================
+# [Ablation B] 양자 혼합 상태 → Gaussian 노이즈 보간
+# ============================================================
+# 목적: 양자 포워드 프로세스 ρ(t)=(1-t)ρ+t·I/D 의 기여도 측정
+#       Gaussian 노이즈 보간으로 대체했을 때 수렴 속도 저하 확인
+#
+# 가설: use_quantum_forward=False 시 loss 수렴이 느려지고
+#       생성 품질(FVD, CLIPSIM)이 하락
+#       → Table 3 (Ablation Studies) 두 번째 행
+# ============================================================
+
+model:
+  model_source: "LTXV_2B_0.9.6_DEV"
+  training_mode: "lora"
+  load_checkpoint: null
+
+lora:
+  rank: 32
+  alpha: 32
+  dropout: 0.0
+  target_modules:
+    - "to_k"
+    - "to_q"
+    - "to_v"
+    - "to_out.0"
+
+conditioning:
+  mode: "qsfm"
+  first_frame_conditioning_p: 0.0
+
+# ── QSFM (Ablation: 양자 포워드 → Gaussian 노이즈) ─────────
+qsfm:
+  n_idx_qubits: 2
+  n_latent_qubits: 4
+  time_embed_dim: 32
+  n_pqc_layers: 1
+  n_ancilla_qubits: 2
+  loss_type: "hilbert_schmidt"
+  loss_weight: 0.3
+  use_cross_shot_hamiltonian: true
+  use_quantum_forward: false          # ← Gaussian 노이즈 보간 (Full 모델은 true)
+
+optimization:
+  learning_rate: 2e-4
+  steps: 1000
+  batch_size: 4
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  optimizer_type: "adamw"
+  scheduler_type: "constant"
+  scheduler_params: {}
+  enable_gradient_checkpointing: true
+
+acceleration:
+  mixed_precision_mode: "bf16"
+  quantization: null
+  load_text_encoder_in_8bit: true
+  compile_with_inductor: false
+  compilation_mode: "reduce-overhead"
+
+data:
+  preprocessed_data_root: "/home/dongwoo43/qfm/qsfm_data"
+  num_dataloader_workers: 0
+
+validation:
+  prompts:
+    - "A cartoon rabbit waddles through an open meadow as small animated birds circle overhead."
+    - "A large fluffy rabbit sits near a pond surrounded by trees in an animated nature scene."
+    - "Three squirrels fly through the air over a forest as a giant rabbit watches with curiosity."
+    - "An animated rabbit chases a small rodent through tall grass in a colorful cartoon forest."
+  negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
+  images: null
+  video_dims: [512, 320, 97]
+  seed: 42
+  inference_steps: 30
+  interval: 100
+  videos_per_prompt: 1
+  guidance_scale: 3.5
+  skip_initial_validation: true
+
+checkpoints:
+  interval: 100
+  keep_last_n: 3
+
+flow_matching:
+  timestep_sampling_mode: "uniform"
+  timestep_sampling_params: {}
+
+hub:
+  push_to_hub: false
+  hub_model_id: null
+
+wandb:
+  enabled: false
+  project: "qsfm-ltxv"
+  entity: null
+  tags: ["qsfm", "ablation", "gaussian_forward", "4shot"]
+  log_validation_videos: true
+
+seed: 42
+output_dir: "outputs/qsfm_ablation_gaussian"

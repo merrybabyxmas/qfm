@@ -1,0 +1,100 @@
+# ============================================================
+# [Ablation A] CrossShotTransitionHamiltonian 제거
+# ============================================================
+# 목적: CrossShotTransitionHamiltonian (Phase D.2) 기여도 측정
+#       이 설정으로 학습 후 eval_metrics.py 로 temporal consistency 점수 비교
+#
+# 가설: Hamiltonian 제거 시 shot-wise CLIP cosine similarity가 하락
+#       → Table 3 (Ablation Studies)에서 CrossShotHamiltonian의 필요성 증명
+# ============================================================
+
+model:
+  model_source: "LTXV_2B_0.9.6_DEV"
+  training_mode: "lora"
+  load_checkpoint: null
+
+lora:
+  rank: 32
+  alpha: 32
+  dropout: 0.0
+  target_modules:
+    - "to_k"
+    - "to_q"
+    - "to_v"
+    - "to_out.0"
+
+conditioning:
+  mode: "qsfm"
+  first_frame_conditioning_p: 0.0
+
+# ── QSFM (Ablation: CrossShotTransitionHamiltonian 비활성화) ──
+qsfm:
+  n_idx_qubits: 2
+  n_latent_qubits: 4
+  time_embed_dim: 32
+  n_pqc_layers: 1
+  n_ancilla_qubits: 2
+  loss_type: "hilbert_schmidt"
+  loss_weight: 0.3
+  use_cross_shot_hamiltonian: false   # ← 제거 (Full 모델은 true)
+  use_quantum_forward: true
+
+optimization:
+  learning_rate: 2e-4
+  steps: 1000
+  batch_size: 4
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  optimizer_type: "adamw"
+  scheduler_type: "constant"
+  scheduler_params: {}
+  enable_gradient_checkpointing: true
+
+acceleration:
+  mixed_precision_mode: "bf16"
+  quantization: null
+  load_text_encoder_in_8bit: true
+  compile_with_inductor: false
+  compilation_mode: "reduce-overhead"
+
+data:
+  preprocessed_data_root: "/home/dongwoo43/qfm/qsfm_data"
+  num_dataloader_workers: 0
+
+validation:
+  prompts:
+    - "A cartoon rabbit waddles through an open meadow as small animated birds circle overhead."
+    - "A large fluffy rabbit sits near a pond surrounded by trees in an animated nature scene."
+    - "Three squirrels fly through the air over a forest as a giant rabbit watches with curiosity."
+    - "An animated rabbit chases a small rodent through tall grass in a colorful cartoon forest."
+  negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
+  images: null
+  video_dims: [512, 320, 97]
+  seed: 42
+  inference_steps: 30
+  interval: 100
+  videos_per_prompt: 1
+  guidance_scale: 3.5
+  skip_initial_validation: true
+
+checkpoints:
+  interval: 100
+  keep_last_n: 3
+
+flow_matching:
+  timestep_sampling_mode: "uniform"
+  timestep_sampling_params: {}
+
+hub:
+  push_to_hub: false
+  hub_model_id: null
+
+wandb:
+  enabled: false
+  project: "qsfm-ltxv"
+  entity: null
+  tags: ["qsfm", "ablation", "no_hamiltonian", "4shot"]
+  log_validation_videos: true
+
+seed: 42
+output_dir: "outputs/qsfm_ablation_no_hamiltonian"
