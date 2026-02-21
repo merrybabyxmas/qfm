@@ -28,3 +28,4 @@ configs/*.yaml
 !configs/ltxv_2b_lora_low_vram.yaml
 outputs
 LTX-Video-Trainer/qsfm_data/
+eval_workspace/
