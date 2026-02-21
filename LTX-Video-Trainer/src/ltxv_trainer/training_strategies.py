@@ -473,6 +473,8 @@ def get_training_strategy(conditioning_config: ConditioningConfig, qsfm_config=N
             n_pqc_layers=qsfm_config.n_pqc_layers,
             n_ancilla_qubits=qsfm_config.n_ancilla_qubits,
             loss_type=qsfm_config.loss_type,
+            use_cross_shot_hamiltonian=qsfm_config.use_cross_shot_hamiltonian,
+            use_quantum_forward=qsfm_config.use_quantum_forward,
         )
         strategy = QSFMTrainingStrategy(
             conditioning_config=conditioning_config,

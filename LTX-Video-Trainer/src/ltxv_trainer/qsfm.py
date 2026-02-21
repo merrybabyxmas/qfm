@@ -519,10 +519,12 @@ class QSFMBackwardChannel(nn.Module):
         time_embed_dim: int = 64,
         n_pqc_layers: int = 1,
         n_ancilla_qubits: int = 2,
+        use_cross_shot_hamiltonian: bool = True,
     ) -> None:
         super().__init__()
         self.n_idx = n_idx_qubits
         self.n_latent = n_latent_qubits
+        self.use_cross_shot_hamiltonian = use_cross_shot_hamiltonian
 
         # Phase C : Stinespring Dilation PQC
         self.stinespring = TQSteinspringLayer(
@@ -539,7 +541,7 @@ class QSFMBackwardChannel(nn.Module):
             time_embed_dim=time_embed_dim,
         )
 
-        # Phase D.2 : Cross-Shot 전이
+        # Phase D.2 : Cross-Shot 전이 (ablation: 비활성화 가능)
         self.transition = CrossShotTransitionHamiltonian(
             n_idx_qubits=n_idx_qubits,
             n_latent_qubits=n_latent_qubits,
@@ -558,8 +560,9 @@ class QSFMBackwardChannel(nn.Module):
         rho = self.stinespring(rho_t, t)
         # Phase D.1
         rho = self.entanglement(rho, t)
-        # Phase D.2
-        rho = self.transition(rho, t)
+        # Phase D.2 (ablation: CrossShotTransitionHamiltonian 선택적 적용)
+        if self.use_cross_shot_hamiltonian:
+            rho = self.transition(rho, t)
         return _project_density_matrix(rho)
 
 
@@ -705,6 +708,8 @@ class QSFMModule(nn.Module):
         n_pqc_layers: int = 1,
         n_ancilla_qubits: int = 2,
         loss_type: str = "hilbert_schmidt",
+        use_cross_shot_hamiltonian: bool = True,
+        use_quantum_forward: bool = True,
     ) -> None:
         super().__init__()
         self.n_idx_qubits = n_idx_qubits
@@ -712,6 +717,7 @@ class QSFMModule(nn.Module):
         self.d_idx = 2 ** n_idx_qubits
         self.d_latent = 2 ** n_latent_qubits
         self.D = self.d_idx * self.d_latent
+        self.use_quantum_forward = use_quantum_forward
 
         # Phase A
         self.amplitude_encoder = AmplitudeEncoder(latent_dim, n_latent_qubits)
@@ -724,6 +730,7 @@ class QSFMModule(nn.Module):
             time_embed_dim=time_embed_dim,
             n_pqc_layers=n_pqc_layers,
             n_ancilla_qubits=n_ancilla_qubits,
+            use_cross_shot_hamiltonian=use_cross_shot_hamiltonian,
         )
 
         # Phase E
@@ -746,8 +753,22 @@ class QSFMModule(nn.Module):
         return rho
 
     def forward_process(self, rho_0: Tensor, t: Tensor) -> Tensor:
-        """Phase B : ρ(0) → ρ(t)."""
-        return QuantumForwardProcess.interpolate(rho_0, t)
+        """Phase B : ρ(0) → ρ(t).
+
+        Quantum forward: ρ(t) = (1-t)ρ(0) + t·I/D  (mixed state interpolation)
+        Ablation mode:   ρ(t) = (1-t)ρ(0) + t·N    (Gaussian noise interpolation)
+        """
+        if self.use_quantum_forward:
+            return QuantumForwardProcess.interpolate(rho_0, t)
+        else:
+            # Ablation: Gaussian noise instead of completely mixed state
+            noise = torch.randn_like(rho_0)
+            # Make noise a valid (approximate) density matrix for shape compatibility
+            noise_sym = (noise + noise.transpose(-1, -2)) / 2.0
+            trace = noise_sym.diagonal(dim1=-2, dim2=-1).sum(-1, keepdim=True).unsqueeze(-1)
+            noise_dm = noise_sym / trace.clamp(min=1e-8)
+            t_v = t.view(-1, 1, 1) if isinstance(t, Tensor) and t.dim() > 0 else t
+            return (1.0 - t_v) * rho_0 + t_v * noise_dm
 
     def backward_pass(self, rho_t: Tensor, t: Tensor) -> Tensor:
         """Phase C/D : ρ(t) → ρ̂(0)."""

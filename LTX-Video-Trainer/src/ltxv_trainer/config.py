@@ -378,6 +378,19 @@ class QSFMConfig(ConfigBaseModel):
         le=1.0,
     )
 
+    # ── Ablation flags ──────────────────────────────────────────
+    use_cross_shot_hamiltonian: bool = Field(
+        default=True,
+        description="[Ablation] Enable CrossShotTransitionHamiltonian (Phase D.2). "
+                    "Disable to measure temporal consistency contribution.",
+    )
+
+    use_quantum_forward: bool = Field(
+        default=True,
+        description="[Ablation] Use quantum mixed-state forward process ρ(t)=(1-t)ρ+t·I/D. "
+                    "If False, uses Gaussian noise interpolation instead.",
+    )
+
 
 class FlowMatchingConfig(ConfigBaseModel):
     """Configuration for flow matching training"""

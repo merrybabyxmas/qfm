@@ -13,6 +13,7 @@ Quantum Superposition Flow Matching 학습을 수행.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import torch
@@ -113,9 +114,26 @@ class QSFMTrainingStrategy(TrainingStrategy):
         t_batch = qsfm_t.unsqueeze(0).expand(1, K).mean(dim=-1)  # scalar → (1,)
         t_single = t_batch[:1]  # (1,)
 
+        # VRAM & latency 추적
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        t0 = time.perf_counter()
+
         # QSFM는 batch=1로 처리 (K개 샷이 단일 양자 상태)
         _, _, qsfm_loss = self.qsfm.training_forward(latents_list, t_single)
         # qsfm_loss는 Tensor scalar — backward 에서 사용 가능
+
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        qsfm_latency_ms = (time.perf_counter() - t0) * 1000
+        peak_vram_mb = (
+            torch.cuda.max_memory_allocated(device) / 1024**2
+            if device.type == "cuda" else 0.0
+        )
+        logger.debug(
+            f"[QSFM] qsfm_latency={qsfm_latency_ms:.1f}ms, "
+            f"peak_vram={peak_vram_mb:.1f}MB"
+        )
 
         # 조건 마스크 (conditioning 없음)
         conditioning_mask = torch.zeros(
