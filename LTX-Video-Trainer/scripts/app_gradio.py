@@ -547,11 +547,34 @@ class GradioUI:
         if params.captions_json:
             try:
                 dataset = json.loads(params.captions_json)
-                # Convert list of dicts to captions_data dict
-                captions_data = {item["media_path"]: item["caption"] for item in dataset}
-                # Save to captions.json (overwrite every time)
+                if not isinstance(dataset, list):
+                    return None, "Captions JSON must be a list of objects."
+
+                validated_dataset = []
+                captions_data = {}
+                for item in dataset:
+                    if not isinstance(item, dict) or "media_path" not in item or "caption" not in item:
+                        continue
+
+                    media_path = item["media_path"]
+                    caption = item["caption"]
+
+                    # Security check: only allow filenames, no paths or traversal
+                    # This prevents path traversal vulnerabilities
+                    safe_name = Path(media_path).name
+                    if not safe_name or safe_name != media_path:
+                        return (
+                            None,
+                            f"Invalid media path: {media_path}. Only filenames are allowed.",
+                        )
+
+                    validated_dataset.append({"media_path": safe_name, "caption": caption})
+                    captions_data[safe_name] = caption
+
+                # Save to captions.json as a list of objects (expected format for preprocessing)
                 with open(training_captions_file, "w") as f:
-                    json.dump(captions_data, f, indent=2)
+                    json.dump(validated_dataset, f, indent=2)
+
                 return captions_data, None
             except Exception as e:
                 return None, f"Invalid captions JSON: {e!s}"
