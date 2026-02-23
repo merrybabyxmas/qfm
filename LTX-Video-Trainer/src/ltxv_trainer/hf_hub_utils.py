@@ -92,21 +92,19 @@ def convert_video_to_gif(video_path: Path, output_path: Path) -> None:
     """Convert a video file to GIF format."""
     try:
         # Read the video file
-        reader = imageio.get_reader(str(video_path))
-        fps = reader.get_meta_data()["fps"]
+        with imageio.get_reader(str(video_path)) as reader:
+            fps = reader.get_meta_data()["fps"]
 
-        # Write GIF file with infinite loop
-        writer = imageio.get_writer(
-            str(output_path),
-            fps=min(fps, 15),  # Cap FPS at 15 for reasonable file size
-            loop=0,  # 0 means infinite loop
-        )
+            # Write GIF file with infinite loop
+            with imageio.get_writer(
+                str(output_path),
+                fps=min(fps, 15),  # Cap FPS at 15 for reasonable file size
+                loop=0,  # 0 means infinite loop
+            ) as writer:
 
-        for frame in reader:
-            writer.append_data(frame)
+                for frame in reader:
+                    writer.append_data(frame)
 
-        writer.close()
-        reader.close()
     except Exception as e:
         logger.error(f"Failed to convert video to GIF: {e}")
 
