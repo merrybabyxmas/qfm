@@ -2,15 +2,6 @@
 """
 FreeNoise Baseline Inference (LTX-Video + Noise Rescheduling)
 =========================================================
-Applies FreeNoise (Qiu et al., 2023) to generate long videos by rescheduling noise in a sliding window.
-Baseline 2 for Controlled Experiments.
-
-Method:
-  - Takes the FIRST prompt from the list (or one prompt).
-  - Generates a long video of length K * frames_per_shot.
-  - Splits the result into K shots for metric comparison.
-  - Uses Noise Rescheduling to maintain temporal consistency without training.
-
 """
 
 from __future__ import annotations
@@ -37,15 +28,11 @@ DEFAULT_PROMPTS = [
 
 NEGATIVE_PROMPT = "worst quality, inconsistent motion, blurry, jittery, distorted"
 
-
 def reschedule_noise_free_noise(
     noise: torch.Tensor,
     window_size: int = 16,
     overlap: int = 4,
 ) -> torch.Tensor:
-    """
-    FreeNoise Noise Rescheduling (Qiu et al., 2023).
-    """
     if noise.dim() == 4:
         return noise
 
@@ -97,9 +84,7 @@ def reschedule_noise_free_noise(
 
     return rescheduled
 
-
 def split_video_frames(frames: list, num_shots: int) -> list[list]:
-    """Splits a long list of frames into num_shots chunks."""
     total = len(frames)
     chunk_size = total // num_shots
     shots = []
@@ -109,11 +94,11 @@ def split_video_frames(frames: list, num_shots: int) -> list[list]:
         shots.append(frames[start:end])
     return shots
 
-
 def run_free_noise_inference(
     prompts: list[str],
     output_dir: Path,
     model_source: str = "LTXV_2B_0.9.6_DEV",
+    lora_weights_path: Path = None,
     width: int = 512,
     height: int = 320,
     frames_per_shot: int = 97,
@@ -123,9 +108,8 @@ def run_free_noise_inference(
     load_in_8bit: bool = True,
     window_size: int = 16,
     overlap: int = 4,
-    num_shots: int = 1, # Explicitly requested K shots
+    num_shots: int = 1,
 ) -> list[Path]:
-    """FreeNoise inference."""
     from ltxv_trainer.ltxv_pipeline import LTXConditionPipeline
     from ltxv_trainer.model_loader import LtxvModelVersion, load_ltxv_components
 
@@ -154,20 +138,20 @@ def run_free_noise_inference(
     )
     pipeline.set_progress_bar_config(disable=False)
 
-    # Calculate total frames for the long video
+    if lora_weights_path and lora_weights_path.exists():
+        print(f"  [LoRA] 파인튜닝된 가중치를 덧씌웁니다: {lora_weights_path}")
+        pipeline.load_lora_weights(str(lora_weights_path))
+
     total_frames = frames_per_shot * num_shots
 
-    # --- Profiling ---
     print_model_summary_and_estimate_resources(
         pipeline,
         method_name="FreeNoise",
         K_shots=num_shots,
         frames_per_shot=frames_per_shot
     )
-    # -----------------
 
-    # VAE dimensions
-    vae_spatial = 32 # Checked in pipeline code (default 32)
+    vae_spatial = 32 
     vae_temporal = 8
     lat_h = height // vae_spatial
     lat_w = width // vae_spatial
@@ -175,19 +159,12 @@ def run_free_noise_inference(
     lat_c = 128
 
     video_paths = []
-
-    # We treat the list of prompts as separate test cases if we are doing single-prompt long generation.
-    # OR if we want to follow AR structure, we take the first prompt and extend it.
-    # Given "completely same text prompt 100 times", we likely iterate over the prompt list
-    # and for EACH prompt, generate a K-shot video.
-
     total_time = 0.0
 
     for i, prompt in enumerate(prompts):
         print(f"\n[{i+1}/{len(prompts)}] FreeNoise (Long Video, K={num_shots}): '{prompt[:60]}...'")
         generator = torch.Generator(device=device).manual_seed(seed + i)
 
-        # FreeNoise Noise Rescheduling
         raw_noise = torch.randn(
             1, lat_c, lat_t, lat_h, lat_w,
             device=device, generator=generator, dtype=torch.bfloat16,
@@ -229,33 +206,29 @@ def run_free_noise_inference(
         total_time += elapsed
 
         full_video = result.frames[0]
-
-        # Split into shots
         shots = split_video_frames(full_video, num_shots)
 
         shot_paths = []
         for s_idx, shot_frames in enumerate(shots):
-            out_path = output_dir / f"test_{i:03d}_shot_{s_idx+1:03d}.mp4"
+            # 🚨 🚀 핵심 수정 부분: test_000_shot_001.mp4 -> shot_001.mp4 
+            out_path = output_dir / f"shot_{s_idx+1:03d}.mp4"
             export_to_video(shot_frames, str(out_path), fps=24)
             shot_paths.append(out_path)
 
         video_paths.extend(shot_paths)
 
-    # Metrics
-    # "Denoising Time per Shot" = Total Time / (Num Prompts * Num Shots)
     avg_per_shot = total_time / (len(prompts) * num_shots)
     print(f"\n[METRICS] Denoising Time per Shot: {avg_per_shot:.4f} s")
     print(f"[METRICS] Total Generation Time: {total_time:.4f} s")
 
     return video_paths
 
-
 def main():
     parser = argparse.ArgumentParser(description="FreeNoise Inference")
-    parser.add_argument("--output_dir", type=Path,
-                        default=Path("/home/dongwoo43/qfm/eval_workspace/baselines/free_noise"))
+    parser.add_argument("--output_dir", type=Path, default=Path("/home/dongwoo43/qfm/eval_workspace/baselines/free_noise"))
     parser.add_argument("--prompts_json", type=Path, default=None)
     parser.add_argument("--model_source",  default="LTXV_2B_0.9.6_DEV")
+    parser.add_argument("--lora_weights_path", type=Path, default=None)
     parser.add_argument("--width",         type=int, default=512)
     parser.add_argument("--height",        type=int, default=320)
     parser.add_argument("--frames_per_shot", type=int, default=97)
@@ -265,8 +238,7 @@ def main():
     parser.add_argument("--window_size",   type=int, default=16)
     parser.add_argument("--overlap",       type=int, default=4)
     parser.add_argument("--no_8bit",       action="store_true")
-    # New argument for scaling
-    parser.add_argument("--num_shots",     type=int, default=1, help="Number of shots (K) to generate per prompt.")
+    parser.add_argument("--num_shots",     type=int, default=1)
 
     args = parser.parse_args()
 
@@ -276,17 +248,11 @@ def main():
     else:
         prompts = DEFAULT_PROMPTS
 
-    print("=" * 65)
-    print("FreeNoise Baseline (Long Video Generation)")
-    print(f"  Output   : {args.output_dir}")
-    print(f"  K Shots  : {args.num_shots}")
-    print(f"  Frames/S : {args.frames_per_shot} (Total {args.frames_per_shot * args.num_shots})")
-    print("=" * 65)
-
     paths = run_free_noise_inference(
         prompts=prompts,
         output_dir=args.output_dir,
         model_source=args.model_source,
+        lora_weights_path=args.lora_weights_path,
         width=args.width,
         height=args.height,
         frames_per_shot=args.frames_per_shot,
@@ -298,9 +264,6 @@ def main():
         overlap=args.overlap,
         num_shots=args.num_shots,
     )
-
-    print(f"\n✅ FreeNoise Complete: {len(paths)} video clips generated.")
-
 
 if __name__ == "__main__":
     main()

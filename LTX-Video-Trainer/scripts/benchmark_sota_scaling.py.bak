@@ -1,0 +1,106 @@
+#!/usr/bin/env python
+"""
+SOTA Macro-Benchmark for Multi-shot Video Generation
+=====================================================
+Method 비교:
+1. Auto-regressive (LTX-Video 순정 순차 생성)
+2. QSFM (Ours, 양자 동시 생성)
+
+각 Method의 추론 스크립트를 subprocess로 호출하고, 
+생성된 profiling_metrics.json을 읽어 종합 CSV(Table)를 만듭니다.
+"""
+
+import subprocess
+import time
+import json
+import pandas as pd
+from pathlib import Path
+
+# ==========================================
+# ⚙️ 벤치마크 설정
+# ==========================================
+METHODS = {
+    # "표에 출력될 이름": "실행할 파이썬 스크립트 명령어"
+    "Auto-regressive": "python scripts/run_autoregressive_inference.py",
+    # "FreeNoise": "python scripts/run_free_noise_inference.py",  # 준비되면 주석 해제
+    "QSFM (Ours)": "python scripts/run_pipeline.py"
+}
+
+K_VALUES = [4, 8, 16, 32]  # 평가할 샷(Cut)의 개수
+FRAMES_PER_SHOT = 24       # 1샷당 프레임 수 (LTX-Video 기본 24프레임 가정)
+STEPS = 30                 # Diffusion 타임스텝
+
+METRICS_FILE = Path("outputs/profiling_metrics.json")
+OUTPUT_CSV = Path("outputs/sota_detailed_comparison.csv")
+
+def run_benchmark():
+    print("🚀 SOTA Macro-Benchmark 시작...")
+    results = []
+
+    for method_name, base_cmd in METHODS.items():
+        for k in K_VALUES:
+            print("-" * 60)
+            print(f"🏃 실행 중: [{method_name}] K={k} 샷")
+            
+            # K샷에 필요한 총 프레임 계산 (Auto-regressive 스크립트 등에서 파라미터로 받도록 처리)
+            total_frames = k * FRAMES_PER_SHOT
+            
+            # 명령어 조합 (프롬프트는 테스트용 짧은 것 사용)
+            cmd = f"{base_cmd} --num_frames {total_frames} --steps {STEPS}"
+            
+            # 이전 메트릭스 파일이 남아있다면 삭제 (충돌 방지)
+            if METRICS_FILE.exists():
+                METRICS_FILE.unlink()
+
+            try:
+                # 하위 스크립트 실행 (stdout 출력은 터미널에 표시)
+                subprocess.run(cmd, shell=True, check=True)
+                
+                # 실행이 성공적으로 끝나면 JSON 파일 읽기
+                if METRICS_FILE.exists():
+                    with open(METRICS_FILE, "r") as f:
+                        metrics = json.load(f)
+                        
+                    # 결과 누적
+                    row = {"Method": method_name, "K_shots": k}
+                    row.update(metrics)
+                    results.append(row)
+                    print(f"✅ 측정 완료: {method_name} (K={k}) -> Denoising/Shot: {metrics['Denoising_Time_Per_Shot(s)']:.2f}s")
+                else:
+                    print(f"❌ 오류: {METRICS_FILE} 가 생성되지 않았습니다. 추론 스크립트 내부에 JSON 저장 로직을 확인하세요.")
+                    
+            except subprocess.CalledProcessError as e:
+                print(f"🚨 런타임 에러 발생: [{method_name}] K={k} 샷 실행 실패")
+                print(e)
+                # 에러가 나도 표에 OOM(Out of Memory) 등으로 기록하기 위해 추가
+                results.append({
+                    "Method": method_name,
+                    "K_shots": k,
+                    "Total_Generation_Time(s)": "OOM / Error",
+                    "Total_Diffusion_Time(s)": "OOM / Error",
+                    "Total_Decoding_Time(s)": "OOM / Error",
+                    "Generation_Time_Per_Shot(s)": "OOM / Error",
+                    "Denoising_Time_Per_Shot(s)": "OOM / Error",
+                    "Peak_VRAM(MB)": "OOM / Error"
+                })
+
+    # ==========================================
+    # 💾 결과 CSV 저장 및 표 출력
+    # ==========================================
+    print("\n" + "=" * 80)
+    print("📊 최종 벤치마크 결과 (Table)")
+    print("=" * 80)
+    
+    df = pd.DataFrame(results)
+    
+    # 보기 좋게 콘솔 출력
+    print(df.to_string(index=False))
+    
+    # CSV 저장
+    OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(OUTPUT_CSV, index=False)
+    print(f"\n✅ 파일 저장 완료: {OUTPUT_CSV}")
+    print("💡 논문 분석 팁: 'Denoising_Time_Per_Shot(s)' 열을 확인하세요. QSFM은 값이 O(1)로 작아져야 성공입니다!")
+
+if __name__ == "__main__":
+    run_benchmark()

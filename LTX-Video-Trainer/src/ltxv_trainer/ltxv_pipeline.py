@@ -662,6 +662,7 @@ class LTXConditionPipeline(DiffusionPipeline, FromSingleFileMixin, LTXVideoLoraL
         num_frames: int = 161,
         num_prefix_latent_frames: int = 2,
         generator: Optional[torch.Generator] = None,
+        latents: Optional[torch.Tensor] = None, # 👈 [추가 1] 인자 추가
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
@@ -670,6 +671,15 @@ class LTXConditionPipeline(DiffusionPipeline, FromSingleFileMixin, LTXVideoLoraL
         latent_width = width // self.vae_spatial_compression_ratio
 
         shape = (batch_size, num_channels_latents, num_latent_frames, latent_height, latent_width)
+        
+        # 👇 [추가 2] 외부에서 받은 latents가 있으면 사용하고, 없으면 새로 랜덤 생성!
+        if latents is None:
+            latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+        else:
+            latents = latents.to(device=device, dtype=dtype)
+
+    
+
         latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
 
         if len(conditions) > 0:
@@ -940,8 +950,8 @@ class LTXConditionPipeline(DiffusionPipeline, FromSingleFileMixin, LTXVideoLoraL
 
         if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
-        if latents is not None:
-            raise ValueError("Passing latents is not yet supported.")
+        # if latents is not None:
+        #     raise ValueError("Passing latents is not yet supported.")
 
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
@@ -1065,6 +1075,7 @@ class LTXConditionPipeline(DiffusionPipeline, FromSingleFileMixin, LTXVideoLoraL
             num_channels_latents=num_channels_latents,
             height=height,
             width=width,
+            latents=latents,
             num_frames=num_frames,
             generator=generator,
             device=device,

@@ -70,6 +70,7 @@ def run_autoregressive_inference(
     load_in_8bit: bool = True,
     conditioning_strength: float = 0.65,
     image_cond_noise_scale: float = 0.15,
+    lora_weights_path: Path = None
 ) -> list[Path]:
     """
     LTX-Video Auto-regressive inference.
@@ -101,6 +102,10 @@ def run_autoregressive_inference(
         transformer=components.transformer.to(device),
     )
     pipeline.set_progress_bar_config(disable=False)
+    
+    if lora_weights_path and lora_weights_path.exists():
+        print(f"  [LoRA] 파인튜닝된 가중치를 덧씌웁니다: {lora_weights_path}")
+        pipeline.load_lora_weights(str(lora_weights_path))
 
     # --- Profiling / Pre-flight Check ---
     print_model_summary_and_estimate_resources(
@@ -205,6 +210,7 @@ def main():
     parser.add_argument("--conditioning_strength", type=float, default=0.65)
     parser.add_argument("--image_cond_noise_scale", type=float, default=0.15)
     parser.add_argument("--no_8bit",        action="store_true")
+    parser.add_argument("--lora_weights_path", type=Path, default=None)
     args = parser.parse_args()
 
     if args.prompts_json and args.prompts_json.exists():
@@ -234,6 +240,7 @@ def main():
         load_in_8bit=not args.no_8bit,
         conditioning_strength=args.conditioning_strength,
         image_cond_noise_scale=args.image_cond_noise_scale,
+        lora_weights_path=args.lora_weights_path,
     )
 
     print(f"\n✅ Auto-regressive Complete: {len(paths)} videos")
