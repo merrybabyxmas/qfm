@@ -1,23 +1,16 @@
 #!/usr/bin/env python
 """
-FreeNoise Baseline 추론 (LTX-Video + Noise Rescheduling)
+FreeNoise Baseline Inference (LTX-Video + Noise Rescheduling)
 =========================================================
-FreeNoise 논문 (Qiu et al., 2023) 기법을 LTX-Video에 적용.
-핵심 아이디어: 슬라이딩 윈도우 내 노이즈를 재스케줄(resample)하여
-멀티샷 간 시간적 일관성을 높임.
+Applies FreeNoise (Qiu et al., 2023) to generate long videos by rescheduling noise in a sliding window.
+Baseline 2 for Controlled Experiments.
 
-논문: "FreeNoise: Tuning-Free Longer Video Diffusion via Noise Rescheduling"
-  - 독립 노이즈 대신 윈도우 기반으로 초기 노이즈를 reschedule
-  - Attention rescaling으로 장거리 의존성 처리
+Method:
+  - Takes the FIRST prompt from the list (or one prompt).
+  - Generates a long video of length K * frames_per_shot.
+  - Splits the result into K shots for metric comparison.
+  - Uses Noise Rescheduling to maintain temporal consistency without training.
 
-여기서는 LTX-Video 위에 FreeNoise 스타일 노이즈 재스케줄 적용.
-
-Usage:
-    conda activate afm
-    cd /home/dongwoo43/qfm/LTX-Video-Trainer
-    PYTHONPATH=src python scripts/run_free_noise_inference.py \\
-        --output_dir /home/dongwoo43/qfm/eval_workspace/baselines/free_noise \\
-        --steps 30
 """
 
 from __future__ import annotations
@@ -25,6 +18,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tempfile
+import time
 from copy import deepcopy
 from pathlib import Path
 
@@ -34,11 +29,10 @@ from diffusers.utils import export_to_video
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from ltxv_trainer.profiling import print_model_summary_and_estimate_resources, PerformanceTimer
+
 DEFAULT_PROMPTS = [
     "A cartoon rabbit waddles through an open meadow as small animated birds circle overhead.",
-    "A large fluffy rabbit sits near a pond surrounded by trees in an animated nature scene.",
-    "Three squirrels fly through the air over a forest as a giant rabbit watches with curiosity.",
-    "An animated rabbit chases a small rodent through tall grass in a colorful cartoon forest.",
 ]
 
 NEGATIVE_PROMPT = "worst quality, inconsistent motion, blurry, jittery, distorted"
@@ -50,20 +44,15 @@ def reschedule_noise_free_noise(
     overlap: int = 4,
 ) -> torch.Tensor:
     """
-    FreeNoise 노이즈 재스케줄링 (Qiu et al., 2023).
-
-    noise shape: (B, C, T, H, W) 또는 (B, C*T, H, W) 가정.
-    - 각 윈도우 내에서 노이즈를 첫 프레임 기준으로 reschedule
-    - 오버랩 구간은 가중 평균으로 블렌딩
+    FreeNoise Noise Rescheduling (Qiu et al., 2023).
     """
     if noise.dim() == 4:
-        return noise  # 2D latent: 재스케줄 불필요
+        return noise
 
     B, C, T, H, W = noise.shape
     if T <= 1:
-        return noise  # 단일 프레임: 재스케줄 불필요
+        return noise
 
-    # window_size, overlap을 T에 맞게 조정
     window_size = min(window_size, T)
     overlap = min(overlap, window_size - 1, T - 1)
     if overlap < 0:
@@ -81,19 +70,15 @@ def reschedule_noise_free_noise(
         if win_len <= 0:
             break
 
-        # 윈도우 내 노이즈: 첫 프레임을 기준으로 시간축 따라 보간
-        base = noise[:, :, t : t + 1, :, :]  # (B, C, 1, H, W)
-        end_f = noise[:, :, end - 1 : end, :, :]  # (B, C, 1, H, W)
+        base = noise[:, :, t : t + 1, :, :]
+        end_f = noise[:, :, end - 1 : end, :, :]
 
-        # 선형 보간 (FreeNoise 핵심: structured noise)
         alphas = torch.linspace(0.0, 1.0, win_len, device=noise.device)
         interp = base * (1 - alphas[None, None, :, None, None]) + end_f * alphas[None, None, :, None, None]
 
-        # 가우시안 노이즈와 혼합 (확률적 요소 유지)
         local_noise = torch.randn_like(interp)
         mixed = 0.7 * interp + 0.3 * local_noise
 
-        # 오버랩 가중치 (삼각형 윈도우)
         weights = torch.ones(win_len, device=noise.device)
         eff_overlap = min(overlap, win_len)
         if t > 0 and eff_overlap > 0:
@@ -107,11 +92,22 @@ def reschedule_noise_free_noise(
 
         t += step
 
-    # 정규화
     count = count.clamp(min=1e-8)
     rescheduled /= count[None, None, :, None, None]
 
     return rescheduled
+
+
+def split_video_frames(frames: list, num_shots: int) -> list[list]:
+    """Splits a long list of frames into num_shots chunks."""
+    total = len(frames)
+    chunk_size = total // num_shots
+    shots = []
+    for i in range(num_shots):
+        start = i * chunk_size
+        end = (i + 1) * chunk_size if i < num_shots - 1 else total
+        shots.append(frames[start:end])
+    return shots
 
 
 def run_free_noise_inference(
@@ -120,22 +116,23 @@ def run_free_noise_inference(
     model_source: str = "LTXV_2B_0.9.6_DEV",
     width: int = 512,
     height: int = 320,
-    num_frames: int = 97,
+    frames_per_shot: int = 97,
     num_inference_steps: int = 30,
     guidance_scale: float = 3.5,
     seed: int = 42,
     load_in_8bit: bool = True,
     window_size: int = 16,
     overlap: int = 4,
+    num_shots: int = 1, # Explicitly requested K shots
 ) -> list[Path]:
-    """FreeNoise 스타일 노이즈 재스케줄로 멀티샷 비디오 생성."""
+    """FreeNoise inference."""
     from ltxv_trainer.ltxv_pipeline import LTXConditionPipeline
     from ltxv_trainer.model_loader import LtxvModelVersion, load_ltxv_components
 
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(f"모델 로딩: {model_source}")
+    print(f"Loading Model: {model_source}")
     try:
         version = LtxvModelVersion(model_source)
     except ValueError:
@@ -157,103 +154,120 @@ def run_free_noise_inference(
     )
     pipeline.set_progress_bar_config(disable=False)
 
-    # VAE spatial 압축 비율 (LTX-Video: 8×8 공간, 4 시간)
-    vae_spatial = 8
-    vae_temporal = 4
+    # Calculate total frames for the long video
+    total_frames = frames_per_shot * num_shots
+
+    # --- Profiling ---
+    print_model_summary_and_estimate_resources(
+        pipeline,
+        method_name="FreeNoise",
+        K_shots=num_shots,
+        frames_per_shot=frames_per_shot
+    )
+    # -----------------
+
+    # VAE dimensions
+    vae_spatial = 32 # Checked in pipeline code (default 32)
+    vae_temporal = 8
     lat_h = height // vae_spatial
     lat_w = width // vae_spatial
-    lat_t = (num_frames - 1) // vae_temporal + 1
-    lat_c = 128  # LTX-Video latent channels
+    lat_t = (total_frames - 1) // vae_temporal + 1
+    lat_c = 128
 
     video_paths = []
+
+    # We treat the list of prompts as separate test cases if we are doing single-prompt long generation.
+    # OR if we want to follow AR structure, we take the first prompt and extend it.
+    # Given "completely same text prompt 100 times", we likely iterate over the prompt list
+    # and for EACH prompt, generate a K-shot video.
+
+    total_time = 0.0
+
     for i, prompt in enumerate(prompts):
-        print(f"\n[{i+1}/{len(prompts)}] FreeNoise: '{prompt[:60]}...'")
+        print(f"\n[{i+1}/{len(prompts)}] FreeNoise (Long Video, K={num_shots}): '{prompt[:60]}...'")
         generator = torch.Generator(device=device).manual_seed(seed + i)
 
-        # FreeNoise 노이즈 재스케줄
+        # FreeNoise Noise Rescheduling
         raw_noise = torch.randn(
             1, lat_c, lat_t, lat_h, lat_w,
             device=device, generator=generator, dtype=torch.bfloat16,
         )
         reschedule_noise = reschedule_noise_free_noise(raw_noise, window_size, overlap)
 
-        # latents_shape이 맞는지 확인 후 주입
-        try:
-            with torch.autocast(device.type, dtype=torch.bfloat16):
-                result = pipeline(
-                    prompt=prompt,
-                    negative_prompt=NEGATIVE_PROMPT,
-                    width=width,
-                    height=height,
-                    num_frames=num_frames,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    generator=torch.Generator(device=device).manual_seed(seed + i),
-                    latents=reschedule_noise,
-                    output_reference_comparison=False,
-                )
-        except (TypeError, ValueError):
-            # latents 파라미터 미지원 시 fallback
-            # FreeNoise: scheduler seed를 조작해 동일 효과 근사
-            print("  [FreeNoise] latents 직접 주입 미지원 → seed 기반 structured noise 사용")
-            # reschedule_noise를 scheduler의 초기 noise로 사용하도록
-            # generator seed를 재조정 (structured randomness)
-            fn_seed = seed + i + int(reschedule_noise.mean().item() * 1e6) % 10000
-            with torch.autocast(device.type, dtype=torch.bfloat16):
-                result = pipeline(
-                    prompt=prompt,
-                    negative_prompt=NEGATIVE_PROMPT,
-                    width=width,
-                    height=height,
-                    num_frames=num_frames,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    generator=torch.Generator(device=device).manual_seed(fn_seed),
-                    output_reference_comparison=False,
-                )
+        with PerformanceTimer(f"FreeNoise Gen {i+1}") as timer:
+            try:
+                with torch.autocast(device.type, dtype=torch.bfloat16):
+                    result = pipeline(
+                        prompt=prompt,
+                        negative_prompt=NEGATIVE_PROMPT,
+                        width=width,
+                        height=height,
+                        num_frames=total_frames,
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=guidance_scale,
+                        generator=torch.Generator(device=device).manual_seed(seed + i),
+                        latents=reschedule_noise,
+                        output_reference_comparison=False,
+                    )
+            except (TypeError, ValueError):
+                print("  [FreeNoise] fallback to scheduler seed manipulation")
+                fn_seed = seed + i + int(reschedule_noise.mean().item() * 1e6) % 10000
+                with torch.autocast(device.type, dtype=torch.bfloat16):
+                    result = pipeline(
+                        prompt=prompt,
+                        negative_prompt=NEGATIVE_PROMPT,
+                        width=width,
+                        height=height,
+                        num_frames=total_frames,
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=guidance_scale,
+                        generator=torch.Generator(device=device).manual_seed(fn_seed),
+                        output_reference_comparison=False,
+                    )
 
-        video = result.frames[0]
-        out_path = output_dir / f"shot_{i+1:03d}.mp4"
-        export_to_video(video, str(out_path), fps=24)
-        print(f"  저장: {out_path}")
-        video_paths.append(out_path)
+        elapsed = timer.end_time - timer.start_time
+        total_time += elapsed
 
-    # combined 비디오
-    if len(video_paths) > 1:
-        import os, subprocess, tempfile
-        combined = output_dir / "combined.mp4"
-        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
-            for p in video_paths:
-                f.write(f"file '{p}'\n")
-            filelist = f.name
-        subprocess.run(
-            ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-             "-i", filelist, "-c", "copy", str(combined)],
-            capture_output=True,
-        )
-        os.unlink(filelist)
-        print(f"\n통합 비디오: {combined}")
+        full_video = result.frames[0]
+
+        # Split into shots
+        shots = split_video_frames(full_video, num_shots)
+
+        shot_paths = []
+        for s_idx, shot_frames in enumerate(shots):
+            out_path = output_dir / f"test_{i:03d}_shot_{s_idx+1:03d}.mp4"
+            export_to_video(shot_frames, str(out_path), fps=24)
+            shot_paths.append(out_path)
+
+        video_paths.extend(shot_paths)
+
+    # Metrics
+    # "Denoising Time per Shot" = Total Time / (Num Prompts * Num Shots)
+    avg_per_shot = total_time / (len(prompts) * num_shots)
+    print(f"\n[METRICS] Denoising Time per Shot: {avg_per_shot:.4f} s")
+    print(f"[METRICS] Total Generation Time: {total_time:.4f} s")
 
     return video_paths
 
 
 def main():
-    parser = argparse.ArgumentParser(description="FreeNoise Inference (LTX-Video + Noise Rescheduling)")
+    parser = argparse.ArgumentParser(description="FreeNoise Inference")
     parser.add_argument("--output_dir", type=Path,
                         default=Path("/home/dongwoo43/qfm/eval_workspace/baselines/free_noise"))
     parser.add_argument("--prompts_json", type=Path, default=None)
     parser.add_argument("--model_source",  default="LTXV_2B_0.9.6_DEV")
     parser.add_argument("--width",         type=int, default=512)
     parser.add_argument("--height",        type=int, default=320)
-    parser.add_argument("--num_frames",    type=int, default=97)
+    parser.add_argument("--frames_per_shot", type=int, default=97)
     parser.add_argument("--steps",         type=int, default=30)
     parser.add_argument("--guidance",      type=float, default=3.5)
     parser.add_argument("--seed",          type=int, default=42)
-    parser.add_argument("--window_size",   type=int, default=16,
-                        help="FreeNoise 슬라이딩 윈도우 크기 (latent 프레임 수)")
-    parser.add_argument("--overlap",       type=int, default=4,
-                        help="윈도우 오버랩 크기")
+    parser.add_argument("--window_size",   type=int, default=16)
+    parser.add_argument("--overlap",       type=int, default=4)
     parser.add_argument("--no_8bit",       action="store_true")
+    # New argument for scaling
+    parser.add_argument("--num_shots",     type=int, default=1, help="Number of shots (K) to generate per prompt.")
+
     args = parser.parse_args()
 
     if args.prompts_json and args.prompts_json.exists():
@@ -263,11 +277,10 @@ def main():
         prompts = DEFAULT_PROMPTS
 
     print("=" * 65)
-    print("FreeNoise Baseline (LTX-Video + Noise Rescheduling)")
-    print(f"  출력     : {args.output_dir}")
-    print(f"  window   : {args.window_size}, overlap: {args.overlap}")
-    print(f"  steps    : {args.steps}")
-    print(f"  prompts  : {len(prompts)}개")
+    print("FreeNoise Baseline (Long Video Generation)")
+    print(f"  Output   : {args.output_dir}")
+    print(f"  K Shots  : {args.num_shots}")
+    print(f"  Frames/S : {args.frames_per_shot} (Total {args.frames_per_shot * args.num_shots})")
     print("=" * 65)
 
     paths = run_free_noise_inference(
@@ -276,17 +289,17 @@ def main():
         model_source=args.model_source,
         width=args.width,
         height=args.height,
-        num_frames=args.num_frames,
+        frames_per_shot=args.frames_per_shot,
         num_inference_steps=args.steps,
         guidance_scale=args.guidance,
         seed=args.seed,
         load_in_8bit=not args.no_8bit,
         window_size=args.window_size,
         overlap=args.overlap,
+        num_shots=args.num_shots,
     )
 
-    print(f"\n✅ FreeNoise 완료: {len(paths)}개 비디오")
-    print(f"   저장 위치: {args.output_dir}")
+    print(f"\n✅ FreeNoise Complete: {len(paths)} video clips generated.")
 
 
 if __name__ == "__main__":
