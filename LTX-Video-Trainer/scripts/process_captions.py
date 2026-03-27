@@ -130,6 +130,33 @@ class CaptionsDataset(Dataset):
             "index": index,
         }
 
+    def _extract_caption_and_path(
+        self, entry: dict[str, Any] | pd.Series, context: str | None = None
+    ) -> tuple[str, str]:
+        """
+        Extract caption and output path from a dataset entry.
+
+        Args:
+            entry: A dictionary or pandas Series containing caption and media path
+            context: Optional context description for error messages (e.g., "JSON entry")
+                     If provided, checks for key existence.
+
+        Returns:
+            Tuple of (output_path, caption)
+        """
+        if context:
+            if self.caption_column not in entry:
+                raise ValueError(f"Key '{self.caption_column}' not found in {context}: {entry}")
+            if self.media_column not in entry:
+                raise ValueError(f"Key '{self.media_column}' not found in {context}: {entry}")
+
+        media_path = Path(entry[self.media_column].strip())
+        # Convert media path to embedding output path (same structure, .pt extension)
+        output_path = str(media_path.with_suffix(".pt"))
+        caption = entry[self.caption_column]
+
+        return output_path, caption
+
     def _load_caption_data(self) -> dict[str, str]:
         """Load captions and compute their output embedding paths."""
         if self.dataset_file.suffix == ".csv":
@@ -152,10 +179,8 @@ class CaptionsDataset(Dataset):
 
         caption_data = {}
         for _, row in df.iterrows():
-            media_path = Path(row[self.media_column].strip())
-            # Convert media path to embedding output path (same structure, .pt extension)
-            output_path = str(media_path.with_suffix(".pt"))
-            caption_data[output_path] = row[self.caption_column]
+            output_path, caption = self._extract_caption_and_path(row)
+            caption_data[output_path] = caption
 
         return caption_data
 
@@ -169,15 +194,10 @@ class CaptionsDataset(Dataset):
 
         caption_data = {}
         for entry in data:
-            if self.caption_column not in entry:
-                raise ValueError(f"Key '{self.caption_column}' not found in JSON entry: {entry}")
-            if self.media_column not in entry:
-                raise ValueError(f"Key '{self.media_column}' not found in JSON entry: {entry}")
-
-            media_path = Path(entry[self.media_column].strip())
-            # Convert media path to embedding output path (same structure, .pt extension)
-            output_path = str(media_path.with_suffix(".pt"))
-            caption_data[output_path] = entry[self.caption_column]
+            output_path, caption = self._extract_caption_and_path(
+                entry, context="JSON entry"
+            )
+            caption_data[output_path] = caption
 
         return caption_data
 
@@ -187,15 +207,10 @@ class CaptionsDataset(Dataset):
         with open(self.dataset_file, "r", encoding="utf-8") as file:
             for line in file:
                 entry = json.loads(line)
-                if self.caption_column not in entry:
-                    raise ValueError(f"Key '{self.caption_column}' not found in JSONL entry: {entry}")
-                if self.media_column not in entry:
-                    raise ValueError(f"Key '{self.media_column}' not found in JSONL entry: {entry}")
-
-                media_path = Path(entry[self.media_column].strip())
-                # Convert media path to embedding output path (same structure, .pt extension)
-                output_path = str(media_path.with_suffix(".pt"))
-                caption_data[output_path] = entry[self.caption_column]
+                output_path, caption = self._extract_caption_and_path(
+                    entry, context="JSONL entry"
+                )
+                caption_data[output_path] = caption
 
         return caption_data
 
